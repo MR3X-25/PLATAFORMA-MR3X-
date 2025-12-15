@@ -1,0 +1,561 @@
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { PrismaService } from '../../config/prisma.service';
+import { PlansService } from '../plans/plans.service';
+import { PlanEnforcementService, PLAN_MESSAGES } from '../plans/plan-enforcement.service';
+import { TokenGeneratorService, TokenEntityType } from '../common/services/token-generator.service';
+import * as fs from 'fs';
+import * as path from 'path';
+
+@Injectable()
+export class PropertiesService {
+  constructor(
+    private prisma: PrismaService,
+    private plansService: PlansService,
+    private planEnforcement: PlanEnforcementService,
+    private tokenGenerator: TokenGeneratorService,
+  ) {}
+
+  async findAll(params: { skip?: number; take?: number; agencyId?: string; status?: string; ownerId?: string; createdById?: string; search?: string }) {
+    const { skip = 0, take = 10, agencyId, status, ownerId, createdById, search } = params;
+
+    const where: any = { deleted: false };
+    if (agencyId) where.agencyId = BigInt(agencyId);
+    if (status) where.status = status;
+    if (ownerId) where.ownerId = BigInt(ownerId);
+    if (createdById) where.createdBy = BigInt(createdById);
+
+    if (search && search.trim()) {
+      const searchTerm = search.trim();
+      where.OR = [
+        { name: { contains: searchTerm } },
+        { address: { contains: searchTerm } },
+        { city: { contains: searchTerm } },
+        { neighborhood: { contains: searchTerm } },
+        { owner: { name: { contains: searchTerm } } },
+        { broker: { name: { contains: searchTerm } } },
+        { tenant: { name: { contains: searchTerm } } },
+      ];
+    }
+
+    const [properties, total] = await Promise.all([
+      this.prisma.property.findMany({
+        where,
+        skip,
+        take,
+        include: {
+          owner: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+              document: true,
+              address: true,
+              complement: true,
+              neighborhood: true,
+              city: true,
+              state: true,
+              cep: true,
+              nationality: true,
+              maritalStatus: true,
+              profession: true,
+              rg: true,
+              birthDate: true,
+              employerName: true,
+              creci: true,
+              creciState: true,
+              bankName: true,
+              bankBranch: true,
+              bankAccount: true,
+              pixKey: true,
+              company: {
+                select: {
+                  id: true,
+                  name: true,
+                  cnpj: true,
+                  address: true,
+                  responsible: true,
+                }
+              }
+            }
+          },
+          tenant: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+              document: true,
+              address: true,
+              complement: true,
+              neighborhood: true,
+              city: true,
+              state: true,
+              cep: true,
+              nationality: true,
+              maritalStatus: true,
+              profession: true,
+              rg: true,
+              birthDate: true,
+              employerName: true,
+              emergencyContactName: true,
+              emergencyContactPhone: true,
+              company: {
+                select: {
+                  id: true,
+                  name: true,
+                  cnpj: true,
+                  address: true,
+                  responsible: true,
+                }
+              }
+            }
+          },
+          broker: { select: { id: true, name: true, email: true, document: true, creci: true, creciState: true } },
+          agency: {
+            select: {
+              id: true,
+              name: true,
+              tradeName: true,
+              cnpj: true,
+              creci: true,
+              creciState: true,
+              email: true,
+              phone: true,
+              address: true,
+              city: true,
+              state: true,
+              zipCode: true,
+              representativeName: true,
+              representativeDocument: true,
+            }
+          },
+          images: { where: { isPrimary: true }, take: 1 },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.property.count({ where }),
+    ]);
+
+    return {
+      data: properties.map(p => this.serializeProperty(p)),
+      total,
+      page: Math.floor(skip / take) + 1,
+      limit: take,
+    };
+  }
+
+  async findOne(id: string) {
+    const property = await this.prisma.property.findUnique({
+      where: { id: BigInt(id) },
+      include: {
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            document: true,
+            address: true,
+            complement: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            cep: true,
+            nationality: true,
+            maritalStatus: true,
+            profession: true,
+            rg: true,
+            birthDate: true,
+            employerName: true,
+            creci: true,
+            creciState: true,
+            bankName: true,
+            bankBranch: true,
+            bankAccount: true,
+            pixKey: true,
+            company: {
+              select: {
+                id: true,
+                name: true,
+                cnpj: true,
+                address: true,
+                responsible: true,
+              }
+            }
+          }
+        },
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            document: true,
+            address: true,
+            complement: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            cep: true,
+            nationality: true,
+            maritalStatus: true,
+            profession: true,
+            rg: true,
+            birthDate: true,
+            employerName: true,
+            emergencyContactName: true,
+            emergencyContactPhone: true,
+            company: {
+              select: {
+                id: true,
+                name: true,
+                cnpj: true,
+                address: true,
+                responsible: true,
+              }
+            }
+          }
+        },
+        broker: { select: { id: true, name: true, email: true, document: true, creci: true, creciState: true } },
+        agency: true,
+        images: true,
+        contracts: { orderBy: { createdAt: 'desc' }, take: 5 },
+      },
+    });
+
+    if (!property || property.deleted) {
+      throw new NotFoundException('Property not found');
+    }
+
+    return this.serializeProperty(property);
+  }
+
+  async create(data: any, user: { sub: string; role: string; agencyId?: string | null }) {
+    const userId = user.sub;
+
+    const agencyId = data.agencyId || user.agencyId || null;
+
+    const planCheck = await this.plansService.checkPlanLimits(userId, 'property');
+    if (!planCheck.allowed) {
+      throw new ForbiddenException(planCheck.message || 'Você atingiu o limite de imóveis do seu plano.');
+    }
+
+    const token = await this.tokenGenerator.generateToken(TokenEntityType.PROPERTY);
+
+    const property = await this.prisma.property.create({
+      data: {
+        token,
+        address: data.address,
+        neighborhood: data.neighborhood,
+        city: data.city,
+        stateNumber: data.stateNumber || data.state,
+        cep: data.cep,
+        monthlyRent: data.monthlyRent,
+        status: data.status || 'DISPONIVEL',
+        name: data.name,
+        dueDay: data.dueDay,
+        ownerId: data.ownerId ? BigInt(data.ownerId) : BigInt(userId),
+        agencyId: agencyId ? BigInt(agencyId) : null,
+        brokerId: data.brokerId ? BigInt(data.brokerId) : null,
+        createdBy: BigInt(userId),
+        registrationNumber: data.registrationNumber || null,
+        builtArea: data.builtArea || null,
+        totalArea: data.totalArea || null,
+        description: data.description || null,
+        furnitureList: data.furnitureList || null,
+        condominiumName: data.condominiumName || null,
+        condominiumFee: data.condominiumFee || null,
+        iptuValue: data.iptuValue || null,
+      },
+    });
+
+    return this.serializeProperty(property);
+  }
+
+  async update(id: string, data: any) {
+    const property = await this.prisma.property.findUnique({
+      where: { id: BigInt(id) },
+      select: {
+        id: true,
+        deleted: true,
+        isFrozen: true,
+        frozenReason: true,
+        agencyId: true,
+      },
+    });
+
+    if (!property || property.deleted) {
+      throw new NotFoundException('Property not found');
+    }
+
+    if (property.isFrozen) {
+      throw new ForbiddenException(
+        property.frozenReason || 'Este imóvel está congelado. Faça upgrade do seu plano.'
+      );
+    }
+
+    const updateData: any = { ...data };
+    if (data.ownerId) updateData.ownerId = BigInt(data.ownerId);
+    if (data.tenantId) updateData.tenantId = BigInt(data.tenantId);
+    if (data.brokerId) updateData.brokerId = BigInt(data.brokerId);
+    if (data.agencyId) updateData.agencyId = BigInt(data.agencyId);
+    if (data.state !== undefined && data.stateNumber === undefined) {
+      updateData.stateNumber = data.state;
+      delete updateData.state;
+    }
+
+    const updated = await this.prisma.property.update({
+      where: { id: BigInt(id) },
+      data: updateData,
+    });
+
+    return this.serializeProperty(updated);
+  }
+
+  async remove(id: string, userId: string) {
+    const property = await this.prisma.property.findUnique({
+      where: { id: BigInt(id) },
+      include: {
+        contracts: { where: { deleted: false }, take: 1 },
+      },
+    });
+
+    if (!property) {
+      throw new NotFoundException('Property not found');
+    }
+
+    if (property.deleted) {
+      throw new NotFoundException('Property already deleted');
+    }
+
+    if (property.contracts && property.contracts.length > 0) {
+      throw new ForbiddenException('Não é possível excluir este imóvel pois possui contratos ativos. Exclua os contratos primeiro.');
+    }
+
+    await this.prisma.property.update({
+      where: { id: BigInt(id) },
+      data: {
+        deleted: true,
+        deletedAt: new Date(),
+        deletedBy: BigInt(userId),
+      },
+    });
+
+    return { message: 'Property deleted successfully' };
+  }
+
+  private serializeProperty(property: any) {
+    return {
+      ...property,
+      id: property.id.toString(),
+      ownerId: property.ownerId?.toString(),
+      tenantId: property.tenantId?.toString(),
+      brokerId: property.brokerId?.toString(),
+      agencyId: property.agencyId?.toString(),
+      createdBy: property.createdBy?.toString(),
+      deletedBy: property.deletedBy?.toString(),
+      monthlyRent: property.monthlyRent?.toString(),
+      nextDueDate: property.nextDueDate?.toISOString() || null,
+      createdAt: property.createdAt?.toISOString() || null,
+      frozenAt: property.frozenAt?.toISOString() || null,
+      isFrozen: property.isFrozen || false,
+      frozenReason: property.frozenReason || null,
+      previousStatus: property.previousStatus || null,
+      builtArea: property.builtArea?.toString() || null,
+      totalArea: property.totalArea?.toString() || null,
+      condominiumFee: property.condominiumFee?.toString() || null,
+      iptuValue: property.iptuValue?.toString() || null,
+      owner: property.owner ? { ...property.owner, id: property.owner.id.toString() } : null,
+      tenant: property.tenant ? { ...property.tenant, id: property.tenant.id.toString() } : null,
+      broker: property.broker ? { ...property.broker, id: property.broker.id.toString() } : null,
+      agency: property.agency ? { ...property.agency, id: property.agency.id.toString() } : null,
+    };
+  }
+
+  async isPropertyFrozen(propertyId: string): Promise<boolean> {
+    const property = await this.prisma.property.findUnique({
+      where: { id: BigInt(propertyId) },
+      select: { isFrozen: true },
+    });
+    return property?.isFrozen ?? false;
+  }
+
+  async assignBroker(propertyId: string, brokerId: string | null, user: any) {
+    const property = await this.prisma.property.findUnique({
+      where: { id: BigInt(propertyId) },
+      select: { id: true, deleted: true, isFrozen: true, frozenReason: true, agencyId: true },
+    });
+
+    if (!property || property.deleted) {
+      throw new NotFoundException('Property not found');
+    }
+
+    if (property.isFrozen) {
+      throw new ForbiddenException(
+        property.frozenReason || 'Este imóvel está congelado. Faça upgrade do seu plano.'
+      );
+    }
+
+    const updated = await this.prisma.property.update({
+      where: { id: BigInt(propertyId) },
+      data: {
+        brokerId: brokerId ? BigInt(brokerId) : null,
+      },
+      include: {
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            document: true,
+            address: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            cep: true,
+            nationality: true,
+            maritalStatus: true,
+            profession: true,
+            rg: true,
+            birthDate: true,
+            bankName: true,
+            bankBranch: true,
+            bankAccount: true,
+            pixKey: true,
+          }
+        },
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            document: true,
+            address: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            cep: true,
+            nationality: true,
+            maritalStatus: true,
+            profession: true,
+            rg: true,
+            birthDate: true,
+          }
+        },
+        broker: { select: { id: true, name: true, email: true, document: true } },
+        agency: {
+          select: {
+            id: true,
+            name: true,
+            tradeName: true,
+            cnpj: true,
+            creci: true,
+            creciState: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            state: true,
+            zipCode: true,
+            representativeName: true,
+            representativeDocument: true,
+          }
+        },
+      },
+    });
+
+    return this.serializeProperty(updated);
+  }
+
+  async assignTenant(propertyId: string, data: { tenantId?: string | null }, user: any) {
+    const property = await this.prisma.property.findUnique({
+      where: { id: BigInt(propertyId) },
+      select: { id: true, deleted: true, isFrozen: true, frozenReason: true },
+    });
+
+    if (!property || property.deleted) {
+      throw new NotFoundException('Property not found');
+    }
+
+    if (property.isFrozen) {
+      throw new ForbiddenException(
+        property.frozenReason || 'Este imóvel está congelado. Faça upgrade do seu plano.'
+      );
+    }
+
+    const updated = await this.prisma.property.update({
+      where: { id: BigInt(propertyId) },
+      data: {
+        tenantId: data.tenantId ? BigInt(data.tenantId) : null,
+      },
+      include: {
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            document: true,
+            address: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            cep: true,
+            nationality: true,
+            maritalStatus: true,
+            profession: true,
+            rg: true,
+            birthDate: true,
+            bankName: true,
+            bankBranch: true,
+            bankAccount: true,
+            pixKey: true,
+          }
+        },
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            document: true,
+            address: true,
+            neighborhood: true,
+            city: true,
+            state: true,
+            cep: true,
+            nationality: true,
+            maritalStatus: true,
+            profession: true,
+            rg: true,
+            birthDate: true,
+          }
+        },
+        broker: { select: { id: true, name: true, email: true, document: true } },
+        agency: {
+          select: {
+            id: true,
+            name: true,
+            tradeName: true,
+            cnpj: true,
+            creci: true,
+            creciState: true,
+            email: true,
+            phone: true,
+            address: true,
+            city: true,
+            state: true,
+            zipCode: true,
+            representativeName: true,
+            representativeDocument: true,
+          }
+        },
+      },
+    });
+
+    return this.serializeProperty(updated);
+  }
+}
